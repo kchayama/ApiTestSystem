@@ -165,14 +165,40 @@
   .modal-actions { display: flex; gap: 10px; }
   .modal-actions button { flex: 1; }
   .secondary { background: #fff; color: var(--ink); border: 1px solid var(--line); }
+
+  /* ヘッダーの設定ボタン・使用中のファイル表示 */
+  .head-right { display: flex; align-items: baseline; gap: 10px; }
+  .link-btn {
+    background: none; color: var(--muted);
+    font-size: 14px; font-weight: 400; padding: 0 2px;
+    text-decoration: underline;
+  }
+  .ids { margin: 0 6px; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+  /* 設定画面（スプレッドシートID） */
+  .set-title { margin: 0 0 4px; font-size: 20px; font-weight: 700; }
+  .set-note { margin: 0 0 4px; font-size: 13px; color: var(--muted); line-height: 1.6; }
+  .field { display: flex; flex-direction: column; gap: 4px; margin-top: 12px; font-size: 14px; color: var(--muted); }
+  .field input { flex: none; width: 100%; font-size: 15px; padding: 10px; }
+  .check { display: flex; align-items: center; gap: 6px; margin-top: 12px; font-size: 14px; color: var(--ink); }
+  .check input { flex: none; width: auto; margin: 0; }
+  .set-msg { min-height: 1.5em; margin: 12px 0 0; font-size: 14px; color: var(--muted); line-height: 1.6; white-space: pre-line; }
+  .set-msg[data-kind="err"] { color: var(--ng); }
+  .set-msg[data-kind="ok"] { color: var(--ok); }
+  .set-actions { margin-top: 14px; }
+  #change-sheet { width: 100%; margin-top: 38px; }
 </style>
 </head>
 <body>
 
 <header>
   <h1>出欠打刻</h1>
-  <span id="clock"></span>
+  <span class="head-right">
+    <button id="settings-btn" type="button" class="link-btn">設定</button>
+    <span id="clock"></span>
+  </span>
 </header>
+<p id="ids" class="ids"></p>
 
 <main style="display:flex;flex-direction:column;gap:6px;">
   <div class="camera">
@@ -219,6 +245,7 @@
       <button id="manual-btn" type="button">打刻</button>
     </div>
   </details>
+  <button id="change-sheet" type="button" class="secondary">対象のスプレッドシートを変更</button>
 </main>
 
 <!-- 本人確認モーダル -->
@@ -235,17 +262,50 @@
   </div>
 </div>
 
+<!-- 設定画面（スプレッドシートID）。初回起動時は自動で開く -->
+<div id="settings" class="modal" hidden>
+  <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="set-title">
+    <p id="set-title" class="set-title">設定（スプレッドシート）</p>
+    <p class="set-note">IDは、スプレッドシートのURL（/d/ と /edit の間の文字列）をそのまま貼り付けても使えます。</p>
+    <label class="field">
+      読み取り用（社員番号の検索・直近受付：シート「集計」）
+      <input id="set-search" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="スプレッドシートのIDまたはURL">
+    </label>
+    <label class="check">
+      <input id="set-same" type="checkbox">
+      記録も同じファイルに書く
+    </label>
+    <label class="field">
+      書き込み用（出欠記録：シート「Sheet1」）
+      <input id="set-record" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="スプレッドシートのIDまたはURL">
+    </label>
+    <p id="set-msg" class="set-msg" aria-live="polite"></p>
+    <div class="modal-actions set-actions">
+      <button id="set-check" type="button" class="secondary">確認</button>
+      <button id="set-save" type="button">保存</button>
+    </div>
+    <div class="modal-actions set-actions">
+      <button id="set-cancel" type="button" class="secondary">キャンセル</button>
+    </div>
+  </div>
+</div>
+
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 <script>
 /* ===== 設定（この1か所だけ書き換えてください） ===== */
 const CONFIG = {
   // Apps Script のURL（末尾が /exec）
-  API_URL: 'https://script.google.com/macros/s/AKfycbyz4D0psXoHdQAAD0LWGdG4Yoio24r08-vonzzGSfR5ZFndxr10CWfq-4-uKHJO90BW/exec',
+  API_URL: 'ここにApps ScriptのURL（/exec で終わる）を入れる',
   // Code.gs の API_TOKEN と同じ値
   API_TOKEN: 'attend2026x',
   ID_DIGITS: 6,          // 社員番号は6桁
   MAX_CANDIDATES: 10,
   REQUEST_TIMEOUT_MS: 50000,
+  RETRY_WAIT_MS: 1000,     // 失敗・一致なし後の待ち時間（ms）
+  SUCCESS_HOLD_MS: 1500,   // 打刻成功後の待ち時間（ms）
+  // 初期値のスプレッドシートID（設定画面で変えられる。Code.gs の ALLOWED_SPREADSHEET_IDS に登録が必要）
+  SEARCH_SHEET_ID: '13QfGYY1GE_wILv4ygnzsdNkbu30x2VG1hFRsUoMUQn8', // 読み取り用：「集計」
+  RECORD_SHEET_ID: '13QfGYY1GE_wILv4ygnzsdNkbu30x2VG1hFRsUoMUQn8', // 書き込み用：「Sheet1」
 };
 
 /* ===== 共通 ===== */
@@ -301,9 +361,20 @@ function prepareFrame() {
   const vh = video.videoHeight;
   if (!vw || !vh) throw new Error('カメラの準備ができていません');
 
-  // 表示中の拡大率に合わせて、画面の枠の内側に見えている範囲だけを読む
-  // （getBoundingClientRect は拡大後の大きさを返すため使わない）
-  const { sx, sy, sw, sh } = getReadRect(zoomLevel);
+  // 画面上の映像表示欄（object-fit: cover で切り取られている）
+  const box = video.getBoundingClientRect();
+  const cw = box.width;
+  const ch = box.height;
+  const s = Math.max(cw / vw, ch / vh);          // cover の拡大率
+  const ox = (cw - vw * s) / 2;                  // 表示欄に対する映像の左端のずれ
+  const oy = (ch - vh * s) / 2;                  // 表示欄に対する映像の上端のずれ
+
+  // 枠（.guide：全方向1%の余白の内側）の位置を、映像の座標に変換する
+  const gx = cw * 0.01, gy = ch * 0.01, gw = cw * 0.98, gh = ch * 0.98;
+  const sx = Math.max(0, (gx - ox) / s);
+  const sy = Math.max(0, (gy - oy) / s);
+  const sw = Math.min(vw - sx, gw / s);
+  const sh = Math.min(vh - sy, gh / s);
 
   // 縦横比を保って、横640pxに合わせる
   const W = Number($('res').value);
@@ -502,11 +573,11 @@ async function onResChange() {
 // 撮影した画面全体を、表示用の画像（data URL）にする
 function snapshotFrame() {
   const shot = document.createElement('canvas');
-  // 拡大表示すると粗く見えるため、カメラの解像度のまま保存する
-  shot.width = video.videoWidth;
-  shot.height = video.videoHeight;
+  const scale = Math.min(1, 640 / video.videoWidth);
+  shot.width = Math.round(video.videoWidth * scale);
+  shot.height = Math.round(video.videoHeight * scale);
   shot.getContext('2d').drawImage(video, 0, 0, shot.width, shot.height);
-  return shot.toDataURL('image/jpeg', 0.92);
+  return shot.toDataURL('image/jpeg', 0.85);
 }
 
 function extractCandidates(text) {
@@ -571,10 +642,16 @@ function callApi(params, abortable) {
   });
 }
 
-function errorMessage(code) {
+function errorMessage(code, detail) {
   if (code === 'unauthorized') return 'トークンが一致しません。設定を確認してください';
   if (code === 'busy') return 'サーバーが混み合っています。しばらくしてから再度お試しください';
-  if (code === 'not_found') return '社員マスタに該当する社員番号がありません';
+  if (code === 'not_found') return '集計に該当する社員番号がありません';
+  if (code === 'record_row_not_found') return 'Sheet1に社員番号の行がありません（記録先のファイルとシートを確認してください）';
+  if (code === 'spreadsheet_not_allowed') return 'このスプレッドシートは許可されていません（設定を確認してください）';
+  if (code === 'invalid_spreadsheet_id') return 'スプレッドシートのIDの形式が正しくありません（設定を確認してください）';
+  if (code === 'cannot_open') return 'スプレッドシートを開けません（設定のIDとアクセス権を確認してください）';
+  if (code === 'sheet_missing') return 'シートが見つかりません（「集計」「Sheet1」の名前を確認してください）';
+  if (code === 'server_error' && detail) return '処理に失敗しました（' + detail + '）';
   return '処理に失敗しました（' + (code || '不明') + '）';
 }
 
@@ -626,7 +703,11 @@ async function runVerification(candidates) {
   setStatus('社員番号を照合しています…');
   let found;
   try {
-    found = await callApi({ action: 'lookup', candidates: JSON.stringify(candidates) }, true);
+    found = await callApi({
+      action: 'lookup',
+      candidates: JSON.stringify(candidates),
+      search_id: settings.searchId,
+    }, true);
   } catch (err) {
     if (err.message === 'ABORTED') {
       setResult('ng', '検索を中断しました', '入力内容が変わったため、照合を取りやめました。もう一度お試しください');
@@ -636,7 +717,7 @@ async function runVerification(candidates) {
     return;
   }
   if (!found.ok) {
-    setResult('err', '照合できませんでした', errorMessage(found.error));
+    setResult('err', '照合できませんでした', errorMessage(found.error, found.detail));
     return;
   }
   if (!found.found) {
@@ -655,9 +736,14 @@ async function runVerification(candidates) {
   // 3-a. はい → 出勤を記録、同じ日の2回目以降は同じ行の日時を上書きして退勤
   if (same) {
     setStatus('記録しています…');
-    const rec = await callApi({ action: 'confirm', id: found.id });
+    const rec = await callApi({
+      action: 'confirm',
+      id: found.id,
+      search_id: settings.searchId,
+      record_id: settings.recordId,
+    });
     if (!rec.ok) {
-      setResult('err', '打刻できませんでした', errorMessage(rec.error));
+      setResult('err', '打刻できませんでした', errorMessage(rec.error, rec.detail));
       return;
     }
     setResult('ok', rec.type + 'を記録しました', rec.name + '\n社員番号 ' + rec.id + '\n' + rec.time);
@@ -665,7 +751,149 @@ async function runVerification(candidates) {
   }
 
   // 3-b. いいえ → 何も記録せず、キャンセルとして表示
-  setResult('ng', 'キャンセルしました', found.name + '\n出勤・退勤は記録していません');
+  setResult('ng', 'キャンセルしました', found.name + '\n出席・退席は記録していません');
+}
+
+/* ===== スプレッドシートの設定（読み取り用・書き込み用） ===== */
+const SETTINGS_KEY = 'attendance.settings.v1';
+let settings = {
+  searchId: CONFIG.SEARCH_SHEET_ID,  // 読み取り用（「集計」）
+  recordId: CONFIG.RECORD_SHEET_ID,  // 書き込み用（「Sheet1」）
+  sameFile: false,
+  saved: false,                      // 一度でも保存したか（初回起動の判定）
+};
+let settingsFirstRun = false;
+
+// URLまたはIDから、スプレッドシートIDを取り出す（取り出せなければ null）
+function parseSpreadsheetId(text) {
+  const t = String(text || '').trim();
+  const m = t.match(/\/d\/([A-Za-z0-9_-]+)/);
+  if (m) return m[1];
+  return /^[A-Za-z0-9_-]{20,}$/.test(t) ? t : null;
+}
+
+// 保存された設定を読む（読めなければ既定値のまま）
+function loadSettings() {
+  try {
+    const s = JSON.parse(localStorage.getItem(SETTINGS_KEY) || 'null');
+    const sid = s && parseSpreadsheetId(s.searchId);
+    const rid = s && parseSpreadsheetId(s.recordId);
+    if (sid && rid) {
+      settings = { searchId: sid, recordId: rid, sameFile: !!s.sameFile, saved: true };
+    }
+  } catch (err) {
+    // 保存内容を読めない環境では既定値を使う
+  }
+}
+
+function saveSettingsToStorage() {
+  try {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify({
+      searchId: settings.searchId,
+      recordId: settings.recordId,
+      sameFile: settings.sameFile,
+    }));
+  } catch (err) {
+    // 保存できない環境では、次に開いたとき既定値に戻る
+  }
+}
+
+function shortId(id) {
+  return id.length > 12 ? id.slice(0, 6) + '…' + id.slice(-4) : id;
+}
+
+// 画面上部に、今使っているファイルのIDを表示する
+function showIds() {
+  const same = settings.recordId === settings.searchId;
+  $('ids').textContent = '読み取り：' + shortId(settings.searchId) +
+    '　記録：' + (same ? '読み取りと同じ' : shortId(settings.recordId));
+}
+
+function setSetMsg(kind, text) {
+  $('set-msg').dataset.kind = kind || '';
+  $('set-msg').textContent = text;
+}
+
+function syncSameFile() {
+  const same = $('set-same').checked;
+  $('set-record').disabled = same;
+  if (same) $('set-record').value = $('set-search').value;
+}
+
+// 設定画面を開く。初回起動時（firstRun）は閉じるボタンを出さない
+function openSettings(firstRun) {
+  if (busy || ocrRunning) {
+    setStatus('読み取りを止めてから設定を変えてください');
+    return;
+  }
+  settingsFirstRun = !!firstRun;
+  $('set-title').textContent = firstRun ? '初期設定（スプレッドシート）' : '設定（スプレッドシート）';
+  $('set-search').value = settings.searchId;
+  $('set-record').value = settings.recordId;
+  $('set-same').checked = settings.sameFile;
+  syncSameFile();
+  $('set-cancel').hidden = !settings.saved;   // 一度も保存していない（初回）ときは閉じられない
+  setSetMsg('', firstRun
+    ? '使うスプレッドシートを確認して「保存」を押してください（既定値のままでも使えます）'
+    : '');
+  $('settings').hidden = false;
+}
+
+// 入力欄の内容を、IDとして読み取る（使えない形なら null）
+function readSettingsForm() {
+  const sameFile = $('set-same').checked;
+  const sid = parseSpreadsheetId($('set-search').value);
+  const rid = sameFile ? sid : parseSpreadsheetId($('set-record').value);
+  return { sid: sid, rid: rid, sameFile: sameFile };
+}
+
+function describeCheck(label, c, sheetName) {
+  if (c && c.ok) return label + '：OK（' + c.title + '）';
+  let reason = '確認できませんでした';
+  if (c && c.error === 'sheet_missing') reason = '「' + sheetName + '」シートがありません';
+  else if (c && c.error === 'cannot_open') reason = 'ファイルを開けません（IDとアクセス権を確認）';
+  else if (c && c.error === 'spreadsheet_not_allowed') reason = 'このファイルはサーバー側で許可されていません（Code.gsのALLOWED_SPREADSHEET_IDSに追加）';
+  else if (c && c.error === 'invalid_spreadsheet_id') reason = 'IDの形式が正しくありません';
+  return label + '：NG（' + reason + '）';
+}
+
+// 「確認」：指定したファイルに必要なシートがあるかを、サーバーに調べてもらう（書き込みはしない）
+async function onSettingsCheck() {
+  const { sid, rid } = readSettingsForm();
+  if (!sid || !rid) {
+    setSetMsg('err', 'IDを入力してください（URLを貼り付けても使えます）');
+    return;
+  }
+  setSetMsg('', '確認しています…');
+  try {
+    const res = await callApi({ action: 'check', search_id: sid, record_id: rid });
+    if (!res.ok) {
+      setSetMsg('err', errorMessage(res.error, res.detail));
+      return;
+    }
+    const lines = [
+      describeCheck('読み取り（集計）', res.check.search, CONFIG.SEARCH_SHEET),
+      describeCheck('書き込み（Sheet1）', res.check.record, CONFIG.RECORD_SHEET),
+    ];
+    const allOk = res.check.search.ok && res.check.record.ok;
+    setSetMsg(allOk ? 'ok' : 'err', lines.join('\n'));
+  } catch (err) {
+    setSetMsg('err', err.message);
+  }
+}
+
+// 「保存」：入力内容を使う設定にして保存する
+function onSettingsSave() {
+  const { sid, rid, sameFile } = readSettingsForm();
+  if (!sid || !rid) {
+    setSetMsg('err', 'IDを入力してください（URLを貼り付けても使えます）');
+    return;
+  }
+  settings = { searchId: sid, recordId: rid, sameFile: sameFile, saved: true };
+  saveSettingsToStorage();
+  showIds();
+  $('settings').hidden = true;
+  setStatus('設定を保存しました');
 }
 
 /* ===== カメラ ===== */
@@ -816,6 +1044,16 @@ async function onOcr() {
   setStatus('停止しました。撮影する場合は「撮影する」を押してください');
 }
 
+$('settings-btn').addEventListener('click', () => openSettings(false));
+$('set-check').addEventListener('click', onSettingsCheck);
+$('set-save').addEventListener('click', onSettingsSave);
+$('change-sheet').addEventListener('click', () => openSettings(true));   // 初期設定の画面を表示
+$('set-cancel').addEventListener('click', () => { $('settings').hidden = true; });
+$('set-same').addEventListener('change', syncSameFile);
+$('set-search').addEventListener('input', () => {
+  if ($('set-same').checked) $('set-record').value = $('set-search').value;
+});
+
 video.addEventListener('loadedmetadata', updateResOptions);
 $('res').addEventListener('change', onResChange);
 $('ocr').addEventListener('click', onOcr);
@@ -857,6 +1095,11 @@ $('manual').addEventListener('input', function () {
     setStatus('中断されました');
   }
 });
+
+/* ===== 起動時 ===== */
+loadSettings();
+showIds();
+if (!settings.saved) openSettings(true);   // 初回起動時は設定画面を開く
 </script>
 </body>
 </html>
