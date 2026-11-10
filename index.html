@@ -166,13 +166,7 @@
   .modal-actions button { flex: 1; }
   .secondary { background: #fff; color: var(--ink); border: 1px solid var(--line); }
 
-  /* ヘッダーの設定ボタン・使用中のファイル表示 */
-  .head-right { display: flex; align-items: baseline; gap: 10px; }
-  .link-btn {
-    background: none; color: var(--muted);
-    font-size: 14px; font-weight: 400; padding: 0 2px;
-    text-decoration: underline;
-  }
+  /* 使用中のファイル表示 */
   .ids { margin: 0 6px; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
 
   /* 設定画面（スプレッドシートID） */
@@ -193,10 +187,7 @@
 
 <header>
   <h1>出欠打刻</h1>
-  <span class="head-right">
-    <button id="settings-btn" type="button" class="link-btn">設定</button>
-    <span id="clock"></span>
-  </span>
+  <span id="clock"></span>
 </header>
 <p id="ids" class="ids"></p>
 
@@ -281,11 +272,8 @@
     </label>
     <p id="set-msg" class="set-msg" aria-live="polite"></p>
     <div class="modal-actions set-actions">
-      <button id="set-check" type="button" class="secondary">確認</button>
-      <button id="set-save" type="button">保存</button>
-    </div>
-    <div class="modal-actions set-actions">
       <button id="set-cancel" type="button" class="secondary">キャンセル</button>
+      <button id="set-save" type="button">保存</button>
     </div>
   </div>
 </div>
@@ -303,7 +291,7 @@ const CONFIG = {
   REQUEST_TIMEOUT_MS: 50000,
   RETRY_WAIT_MS: 1000,     // 失敗・一致なし後の待ち時間（ms）
   SUCCESS_HOLD_MS: 1500,   // 打刻成功後の待ち時間（ms）
-  // 初期値のスプレッドシートID（設定画面で変えられる。Code.gs の ALLOWED_SPREADSHEET_IDS に登録が必要）
+  // 初期値のスプレッドシートID（設定画面で変えられる）
   SEARCH_SHEET_ID: '13QfGYY1GE_wILv4ygnzsdNkbu30x2VG1hFRsUoMUQn8', // 読み取り用：「集計」
   RECORD_SHEET_ID: '13QfGYY1GE_wILv4ygnzsdNkbu30x2VG1hFRsUoMUQn8', // 書き込み用：「Sheet1」
 };
@@ -647,7 +635,6 @@ function errorMessage(code, detail) {
   if (code === 'busy') return 'サーバーが混み合っています。しばらくしてから再度お試しください';
   if (code === 'not_found') return '集計に該当する社員番号がありません';
   if (code === 'record_row_not_found') return 'Sheet1に社員番号の行がありません（記録先のファイルとシートを確認してください）';
-  if (code === 'spreadsheet_not_allowed') return 'このスプレッドシートは許可されていません（設定を確認してください）';
   if (code === 'invalid_spreadsheet_id') return 'スプレッドシートのIDの形式が正しくありません（設定を確認してください）';
   if (code === 'cannot_open') return 'スプレッドシートを開けません（設定のIDとアクセス権を確認してください）';
   if (code === 'sheet_missing') return 'シートが見つかりません（「集計」「Sheet1」の名前を確認してください）';
@@ -847,41 +834,6 @@ function readSettingsForm() {
   return { sid: sid, rid: rid, sameFile: sameFile };
 }
 
-function describeCheck(label, c, sheetName) {
-  if (c && c.ok) return label + '：OK（' + c.title + '）';
-  let reason = '確認できませんでした';
-  if (c && c.error === 'sheet_missing') reason = '「' + sheetName + '」シートがありません';
-  else if (c && c.error === 'cannot_open') reason = 'ファイルを開けません（IDとアクセス権を確認）';
-  else if (c && c.error === 'spreadsheet_not_allowed') reason = 'このファイルはサーバー側で許可されていません（Code.gsのALLOWED_SPREADSHEET_IDSに追加）';
-  else if (c && c.error === 'invalid_spreadsheet_id') reason = 'IDの形式が正しくありません';
-  return label + '：NG（' + reason + '）';
-}
-
-// 「確認」：指定したファイルに必要なシートがあるかを、サーバーに調べてもらう（書き込みはしない）
-async function onSettingsCheck() {
-  const { sid, rid } = readSettingsForm();
-  if (!sid || !rid) {
-    setSetMsg('err', 'IDを入力してください（URLを貼り付けても使えます）');
-    return;
-  }
-  setSetMsg('', '確認しています…');
-  try {
-    const res = await callApi({ action: 'check', search_id: sid, record_id: rid });
-    if (!res.ok) {
-      setSetMsg('err', errorMessage(res.error, res.detail));
-      return;
-    }
-    const lines = [
-      describeCheck('読み取り（集計）', res.check.search, CONFIG.SEARCH_SHEET),
-      describeCheck('書き込み（Sheet1）', res.check.record, CONFIG.RECORD_SHEET),
-    ];
-    const allOk = res.check.search.ok && res.check.record.ok;
-    setSetMsg(allOk ? 'ok' : 'err', lines.join('\n'));
-  } catch (err) {
-    setSetMsg('err', err.message);
-  }
-}
-
 // 「保存」：入力内容を使う設定にして保存する
 function onSettingsSave() {
   const { sid, rid, sameFile } = readSettingsForm();
@@ -1044,8 +996,6 @@ async function onOcr() {
   setStatus('停止しました。撮影する場合は「撮影する」を押してください');
 }
 
-$('settings-btn').addEventListener('click', () => openSettings(false));
-$('set-check').addEventListener('click', onSettingsCheck);
 $('set-save').addEventListener('click', onSettingsSave);
 $('change-sheet').addEventListener('click', () => openSettings(true));   // 初期設定の画面を表示
 $('set-cancel').addEventListener('click', () => { $('settings').hidden = true; });
