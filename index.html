@@ -283,7 +283,7 @@
 /* ===== 設定（この1か所だけ書き換えてください） ===== */
 const CONFIG = {
   // Apps Script のURL（末尾が /exec）
-  API_URL: 'https://script.google.com/macros/s/AKfycbyz4D0psXoHdQAAD0LWGdG4Yoio24r08-vonzzGSfR5ZFndxr10CWfq-4-uKHJO90BW/exec',
+  API_URL: 'ここにApps ScriptのURL（/exec で終わる）を入れる',
   // Code.gs の API_TOKEN と同じ値
   API_TOKEN: 'attend2026x',
   ID_DIGITS: 6,          // 社員番号は6桁
@@ -294,12 +294,17 @@ const CONFIG = {
   // 初期値のスプレッドシートID（設定画面で変えられる）
   SEARCH_SHEET_ID: '13QfGYY1GE_wILv4ygnzsdNkbu30x2VG1hFRsUoMUQn8', // 読み取り用：「集計」
   RECORD_SHEET_ID: '13QfGYY1GE_wILv4ygnzsdNkbu30x2VG1hFRsUoMUQn8', // 書き込み用：「Sheet1」
+  // Google Cloud のAPIキー。入っていれば Google Cloud Vision だけを使う（Tesseract は使わない）。空欄なら Tesseract（ブラウザ内）を使う
+  // キーは Cloud Vision API のみに制限し、ウェブサイトの制限で GitHub Pages に限定する
+  VISION_API_KEY: 'ocr-kchayama-2026id@attendance-ocr-514910.iam.gserviceaccount.com',
+  VISION_WIDTH: 1200,       // Vision に送る画像の最大横幅（px）
 };
 
 /* ===== 共通 ===== */
 const $ = (id) => document.getElementById(id);
 const video = $('video');
 const canvas = $('canvas');
+const colorCanvas = document.createElement('canvas');   // Vision に送るカラーの読み取り範囲
 let stream = null;
 let workerPromise = null;
 let captured = false;   // 撮影画像を表示中か
@@ -364,11 +369,17 @@ function prepareFrame() {
   const sw = Math.min(vw - sx, gw / s);
   const sh = Math.min(vh - sy, gh / s);
 
-  // 縦横比を保って、横640pxに合わせる
+  // 縦横比を保って、横640pxに合わせる（白黒の canvas）
   const W = Number($('res').value);
   const H = Math.round((W * sh) / sw);
   canvas.width = W;
   canvas.height = H;
+
+  // Vision に送るカラーの画像（読み取り範囲をそのまま。横は VISION_WIDTH 以下）
+  const VW = Math.min(Math.round(sw), CONFIG.VISION_WIDTH);
+  colorCanvas.width = VW;
+  colorCanvas.height = Math.round((VW * sh) / sw);
+  colorCanvas.getContext('2d').drawImage(video, sx, sy, sw, sh, 0, 0, VW, colorCanvas.height);
 
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
   ctx.drawImage(video, sx, sy, sw, sh, 0, 0, W, H);
@@ -570,7 +581,8 @@ function snapshotFrame() {
 
 function extractCandidates(text) {
   const norm = text.replace(/[OoQD]/g, '0').replace(/[IilL|]/g, '1');
-  const runs = norm.match(/\d+(?:[\s-]+\d+)*/g) || [];
+  // 空白や「-」でつながる数字は1つにまとめる。改行はまたがない（行の違う数字を混ぜないため）
+  const runs = norm.match(/\d+(?:(?:[^\S\r\n]|-)+\d+)*/g) || [];
   lastReadRuns = runs.map((r) => r.replace(/\D/g, '')).filter(Boolean);
   const set = new Set();
   for (const digits of lastReadRuns) {
@@ -579,6 +591,52 @@ function extractCandidates(text) {
     }
   }
   return Array.from(set).slice(0, CONFIG.MAX_CANDIDATES);
+}
+
+/* ===== 読み取りエンジン（Google Cloud Vision / ブラウザ内の Tesseract） ===== */
+// Vision に画像を送り、読み取った文字列全体を受け取る
+async function visionReadText(c) {
+  const b64 = c.toDataURL('image/jpeg', 0.9).split(',')[1];
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), CONFIG.REQUEST_TIMEOUT_MS);
+  try {
+    const res = await fetch(
+      'https://vision.googleapis.com/v1/images:annotate?key=' + encodeURIComponent(CONFIG.VISION_API_KEY),
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          requests: [{ image: { content: b64 }, features: [{ type: 'TEXT_DETECTION' }] }],
+        }),
+        signal: ctrl.signal,
+      }
+    );
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error('Vision: ' + ((data.error && data.error.message) || 'HTTP ' + res.status));
+    }
+    const r = data.responses && data.responses[0];
+    if (r && r.error) throw new Error('Vision: ' + r.error.message);
+    return (r && r.textAnnotations && r.textAnnotations[0] && r.textAnnotations[0].description) || '';
+  } catch (err) {
+    if (err.name === 'AbortError') throw new Error('Visionの応答がタイムアウトしました');
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// 社員番号の候補を取り出す。APIキーがあれば Vision だけを使い、キーが無いときだけ Tesseract（ブラウザ内）を使う
+async function readCandidates() {
+  if (CONFIG.VISION_API_KEY) {
+    setStatus('Google Cloud Visionで文字を読み取っています…');
+    const text = await visionReadText(colorCanvas);
+    return extractCandidates(text);
+  }
+  const ocr = await getWorker();
+  setStatus('文字を読み取っています…');
+  const result = await ocr.recognize(canvas);
+  return extractCandidates(result.data.text);
 }
 
 /* ===== サーバー通信（<script>方式） ===== */
@@ -934,10 +992,7 @@ async function onRead() {
     return;
   }
   try {
-    const ocr = await getWorker();
-    setStatus('文字を読み取っています…');
-    const result = await ocr.recognize(canvas);
-    await verifyAndRecord(extractCandidates(result.data.text));
+    await verifyAndRecord(await readCandidates());
   } catch (err) {
     setResult('err', '読み取りに失敗しました', err.message || String(err));
   }
@@ -974,10 +1029,7 @@ async function onOcr() {
         continue;
       }
       prepareFrame();
-      const ocr = await getWorker();
-      setStatus('文字を読み取っています…');
-      const result = await ocr.recognize(canvas);
-      await verifyAndRecord(extractCandidates(result.data.text));
+      await verifyAndRecord(await readCandidates());
       if ($('result').dataset.kind === 'ok') {
         wait = CONFIG.SUCCESS_HOLD_MS;
       }
